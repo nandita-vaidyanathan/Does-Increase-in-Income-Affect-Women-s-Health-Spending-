@@ -1,0 +1,483 @@
+---
+title: "pp482 final"
+author: "Nandita"
+date: "2024-11-28"
+output: pdf_document
+---
+This document contains code for my paper titled "Does Income Affect Women's Health Spending? Evidence from India's Formal Sector". This paper examines how women's control over income affects household health investment decisions by exploiting a 2018 policy change in India that increased take-home pay for women in the formal sector. Using household-level panel data from 2016-2019, I implement a difference-in-differences strategy comparing female-majority households in formal versus informal employment. 
+
+I already cleaned the data set in another rmarkdown file, which is attached along with this one. 
+
+```{r setup, include=FALSE}
+library(readr)
+#install.packages("lubridate")
+library(lubridate)
+library(plm)
+library(dplyr)
+library(ggplot2)
+library(gtsummary)
+library(kableExtra)
+library(tidyr)
+library(lme4)
+library(car)
+library(stargazer)
+#install.packages("dotwhisker")
+library(dotwhisker)
+
+#load cleaned dataset
+Final_HH_dataset <- read_csv("/Users/nandita/Documents/Final_proj.csv")
+```
+
+```{r cars}
+#classifying occupation groups as formal or informal employment
+final_hh_data <- Final_HH_dataset %>%
+                  mutate(employment_type = case_when(occupation_group %in% c("Business & Salaried Employees", "Industrial Workers", "Legislators/Social Workers/Activists", "Managers/Supervisors", "Non-industrial Technical Employees", "Organised 5Farmers", "Qualified Self-employed Professionals", "Wage Labourers", "White-collar Clerical Employees", "White-collar Professional Employees")~ 'Formal Employment', occupation_group == "Data Not Available" ~ "Not Available",
+      TRUE ~ "Informal Employment"))
+
+highest_inf_pop <- final_hh_data %>%
+  filter(employment_type == "Informal Employment") %>%
+  group_by(occupation_group) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+highest_form_pop <- final_hh_data %>%
+  filter(employment_type == "Formal Employment") %>%
+  group_by(occupation_group) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+#creating a dummy variable for beneficiary
+final_hh_data$Beneficiary <- ifelse(final_hh_data$employment_type == 'Formal Employment', 1, 0)
+
+# creating a date variable by using a reference date
+final_hh_data$Date <- dmy(paste0("01-", final_hh_data$month))
+reference_date <- ymd("2018-02-01")
+
+# creating dummy variable for Post February 2018 
+final_hh_data$Post_2018 <- ifelse(final_hh_data$Date >= reference_date, 1, 0)
+
+```
+
+```{r}
+# creating a table by selecting employment_type and occupation_group and sorting them in ascending order
+table1 <- final_hh_data %>%
+  select(employment_type, occupation_group) %>%
+  tbl_summary(sort = all_categorical() ~ "frequency") %>%
+  as_kable(format = "latex", booktabs = TRUE,
+           caption = "Percentage of Female Workers by Employment and Occupation Group") %>%
+  kable_styling(latex_options = c("striped"))
+
+
+#selecting variables under health expenditure and other expenditure 
+health_exp <- c("m_exp_health", "m_exp_doctors_physio_fee", "m_exp_medical_tests",
+                        "m_exp_hospitalisation_fees", "m_exp_health_ins_premium", "m_exp_health_enhancement")
+
+avg_health_exp <- final_hh_data %>% 
+                        group_by(year)%>%
+                        summarise(across(all_of(health_exp), mean))
+
+# Calculate average health expenditure for beneficiary group only
+avg_health_exp_ben <- final_hh_data %>% 
+  group_by(year, Beneficiary) %>%
+  summarise(across(all_of(health_exp), mean))
+
+long_data_ben <- avg_health_exp_ben %>%
+  pivot_longer(
+    cols = health_exp, 
+    names_to = "Health Outcome", values_to = "Mean"
+  )
+
+# now we create a table summarising the main outcome variables
+
+long_avg_health_exp <- avg_health_exp %>%
+  pivot_longer(
+    cols = health_exp, 
+    names_to = "Health Outcome", values_to = "Mean"
+  )
+table2 <- long_avg_health_exp %>%
+  pivot_wider(names_from = year, values_from = "Mean") %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2))) %>%
+  kable(caption = "Average Monthly Household Health Expenditure in Hundreds INR", 
+        format = "latex", 
+        booktabs = TRUE) %>%
+  kable_styling(latex_options = c("striped"))
+
+# Create barplot of health expenditure variables by treatment and control group
+my_colors <- c("#9ecae1","#3182bd")
+ggplot(data = long_data_ben, aes(x = reorder(`Health Outcome`, -Mean), y = Mean, fill = factor(Beneficiary))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~year, ncol = 2) +
+  labs(
+    title = "Average Health Expenditure by Type for Beneficiaries",
+    x = "Health Expenditure",
+    y = "Mean Expenditure (in Hundreds INR)",
+    fill = "Beneficiary Status"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  ) +
+  geom_text(aes(label = round(Mean, 1)), position = position_dodge(width = 0.9), vjust = -0.5, color = "black", size = 3) +
+  scale_fill_manual(values = my_colors, labels = c("Non-Beneficiary", "Beneficiary")) +
+  scale_x_discrete(labels = c('Total Health Exp', 'Health Enhancement', 'Doctors Fee', 'Hospital Fee', 'Medical Tests', 'Health Insurance Premium'))
+```
+
+```{r}
+# adding covariates and grouping them to make them more interpretable
+# For Age Groups
+final_hh_data <- final_hh_data %>%
+  mutate(age_group_simple = case_when(
+    age_group %in% c("Youngsters - dominant", "Children - dominant", 
+                     "Other households of the Young") ~ "Young-dominated",
+    age_group %in% c("Grown-up - dominant", "Others households of Grown-ups",  
+                     "Balanced households with no Seniors") ~ "Adult-dominated",
+    age_group %in% c("Seniors - dominant", "Balanced households with Seniors") ~ "Senior-present",
+    TRUE ~ "Not Applicable"
+  ))
+
+# For Education Groups
+final_hh_data <- final_hh_data %>%
+  mutate(edu_group_simple = case_when(
+    edu_group %in% c("All Graduates household", "Graduates majority household", 
+                     "Graduates dominated household", "Graduates minority household") ~ "High-education",
+    edu_group %in% c("All Matriculates household", "Matriculates majority household", 
+                     "Matriculates dominated household", "Matriculates minority household") ~ "Medium-education",
+    edu_group %in% c("Households of some literates", "Households of all literates") ~ "Basic-education",
+    edu_group == "Households of all illiterates" ~ "Low-education",
+    TRUE ~ "Other"
+  ))
+```
+
+```{r}
+# converting covariates to factors
+final_hh_data$age_group_simple <- as.factor(final_hh_data$age_group_simple)
+final_hh_data$edu_group_simple <- as.factor(final_hh_data$edu_group_simple)
+```
+
+```{r}
+#converting expenditure variable to log to correct for any skewed data
+final_hh_data <- final_hh_data %>%
+                  mutate(log_m_exp_health = log(m_exp_health + 10))%>%
+  mutate(log_tot_exp = log(tot_exp +10))%>%
+  mutate(log_m_exp_doc = log(m_exp_doctors_physio_fee +10))%>%
+  mutate(log_m_exp_medtest = log(m_exp_medical_tests +10))%>%
+  mutate(log_hosp_fee = log(m_exp_hospitalisation_fees +10))%>%
+  mutate(log_health_ins = log(m_exp_health_ins_premium +10))%>%
+  mutate(log_health_enh = log(m_exp_health_enhancement +10))%>%
+  mutate(log_exp_food = log(m_exp_food +10))%>%
+  mutate(log_exp_bills = log(m_exp_bills_n_rent +10))%>%
+  mutate(log_exp_clothing = log(m_exp_clothing_n_footwear +10))%>%
+  mutate(log_exp_transport = log(m_exp_transport +10))%>%
+  mutate(log_exp_recreation = log(m_exp_recreation +10))
+  
+# calculating monthly average of health expenditure
+monthly_avg_data <- final_hh_data %>%
+  group_by(Date, Beneficiary) %>%
+  summarise(mean_health_expenditure = mean(m_exp_health))
+
+
+#Plot to check parallel trends
+ggplot(data = monthly_avg_data, aes(x = Date, y = mean_health_expenditure, color =
+factor(Beneficiary))) +
+geom_line(size = 1.2) +
+geom_vline(xintercept = as.Date("2018-02-01"), linetype = "dashed", color = "gray40",
+size = 0.8)+
+scale_x_date(date_labels = "%b %Y", date_breaks = "6 months") +
+scale_color_manual(values = c("0" = "#9ecae1", "1" = "#3182bd"), 
+                    labels = c("0" = "Non-Beneficiary", "1" = "Beneficiary")) + 
+  labs(title = "Difference-in-Differences - Parallel Trends Assumption",
+       x = "Month and Year",
+       y = "Average Health Expenditure",
+       color = "Group")+
+theme_minimal(base_size = 14) +
+theme(
+plot.title = element_text(hjust = 0.5, face = "bold"),
+legend.position = "top",
+legend.title = element_text(face = "bold")
+)
+
+
+```
+
+```{r pressure, echo=FALSE}
+#two way fixed effects DiD model
+
+model_1 <- plm(log_m_exp_health ~ Beneficiary + Post_2018 + Beneficiary:Post_2018, index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+#summary(model_1)
+
+#add age_group covariate to baseline model
+model_2 <-  plm(log_m_exp_health ~ Beneficiary:Post_2018 + as.factor(age_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+#summary(model_2)
+
+#add edu_group to model 2
+model_3 <-  plm(log_m_exp_health ~ Beneficiary:Post_2018 + as.factor(age_group_simple)+ as.factor(edu_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+#summary(model_3)
+```
+
+```{r, results='asis'}
+stargazer(model_1, model_2, model_3, 
+          type = "latex",
+          title = "Model Selection",
+          keep = "Beneficiary:Post_2018",
+          omit.stat = c("f", "ser"),
+          no.space = TRUE,
+          single.row = TRUE,
+          font.size = "small")
+
+```
+The baseline model without controls shows a decrease of 1.3% in health expenditure. Adding age group controls changes the direction and magnitude of the effect to a 2.1% increase, suggesting significant confounding by household age composition. The addition of education controls stabilizes the effect at 1.9%, which remains robust. This progression demonstrates the importance of controlling for household characteristics in isolating the policy's impact.
+
+```{r}
+#add region_type to model 3
+#model_4 <- plm(log_m_exp_health ~ Beneficiary:Post_2018 + as.factor(age_group)+ as.factor(edu_group) +as.factor(region_type), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+#summary(model_4)
+
+
+#run a random effects model to check significance of region type, a time invariant component
+model_random <- plm(log_m_exp_health ~ Beneficiary * Post_2018 + as.factor(age_group) + 
+                 as.factor(edu_group) + as.factor(region_type), 
+                index = c("hh_id", "Date"), 
+                data = final_hh_data, 
+               model = "random", 
+              effect = "twoways")
+#summary(model_random)
+
+#The random effects model increases the coefficient for Beneficiary*Post 2018 variable significantly
+
+#Hausman Test
+phtest(model_random, model_2)
+```
+Adding age group and education level improves the r-squared value, although only negligibly, however they're important confounders that need to be added to the model, lack of which results in omitted variable bias.
+
+We reject the null hypothesis that the random effects estimator is consistent. This implies that the random effects model does not adequately account for omitted variable bias. So we stick with the fixed effects model. Since region_type is absorbed in the presence of a fixed effect, we can exclude it from the model. 
+
+```{r}
+# to check for multicollinearity, we use a pooled model
+pooled_model <- plm(log_m_exp_health ~ Beneficiary:Post_2018 + as.factor(age_group_simple) + as.factor(edu_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data, model = "pooling")
+vif(pooled_model)
+
+# there exists no multicollinearity in the model
+```
+
+```{r, results='asis'}
+#the final model
+model_3 <-  plm(log_m_exp_health ~ Beneficiary:Post_2018 + as.factor(age_group_simple)+ as.factor(edu_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+#summary(model_3)
+```
+
+```{r, results = `asis`}
+stargazer(model_3, 
+          type = "latex",
+          title = "Final Model",
+          omit.stat = c("f", "ser"),
+          omit = "as.factor\\(edu_group_simple\\)Other",
+          no.space = TRUE,
+          single.row = TRUE,
+          font.size = "small")
+
+levels(final_hh_data$age_group_simple) #reference group is balanced households with no seniors
+levels(final_hh_data$edu_group_simple) #reference group is all graduate households
+
+```
+
+```{r}
+# creating dot plots for covariates
+
+model_3_edu <- broom::tidy(model_3)
+model_edu <- model_3_edu %>%
+  filter(grepl("edu_group_simple", term)) %>%
+  filter(term != "as.factor(edu_group_simple)Other") %>% 
+  mutate(term = gsub("as.factor\\(edu_group_simple\\)", "", term))
+
+model_age <- model_3_edu%>%
+  filter(grepl("age_group_simple", term))%>%
+  mutate(term = gsub("as.factor\\(age_group_simple\\)", "", term))
+
+# For education coefficients
+dwplot(model_edu) +
+  theme_minimal() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray60") +
+  theme(
+    legend.position = "none"
+  ) +
+  scale_y_discrete(labels = c("Medium-education", "Low-education", "High-education")) +
+  labs(
+    title = "Education Effects on Health Expenditure",
+    x = "Coefficient Estimate",
+    y = "Education Level"
+  ) +
+  scale_color_manual(values = "#3182bd")
+
+# For age coefficients
+dwplot(model_age) +
+  theme_minimal() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray60") +
+  theme(
+    legend.position = "none"
+  ) +
+  scale_y_discrete(labels = c( "Young-dominated", "Senior-present")) +
+  labs(
+    title = "Age Composition Effects on Health Expenditure",
+    x = "Coefficient Estimate",
+    y = "Household Age Composition"
+  ) +
+  scale_color_manual(values = "#3182bd")
+```
+The interaction term Beneficiary:Post_2018 is positive and statistically significant at the 0.01 level, indicating that female households in the formal sector experienced a 1.9% higher growth in health expenditures post-2018 relative to female households in the informal sector, after accounting for household age and education composition.This suggests that the income shock from the 2018 policy had a measurable impact on the health spending behavior of beneficiary households.
+
+Among the age-related categories, female-headed households with seniors-present exhibit the largest positive associations with health expenditures compared to the reference group, households with adults, with an increase of 2.7% (p < 0.01) in monthly health expenditure compared to adult households.
+
+Young-dominated households see an associated increase of 2.3% (p < 0.01), compared to adult-dominated households, closely following households with seniors present. 
+In terms of education, female-headed households with majority highly educated individuals  exhibit the highest health expenditures, with a substantial 23.9% higher spending compared to the reference group, households with basic-education, significant at the 0.01 level. Similarly, households with medium-education see an associated 13.9% (p < 0.01)  increase in health expenditure compared with households with basic education. On the other hand, households with low education spend 8.8% (p < 0.01) less than the reference group. 
+
+
+```{r, results='asis'}
+# Create quarter dummies
+final_hh_data <- final_hh_data %>%
+  mutate(year_quarter = paste0(year(Date), "_Q", quarter(Date)),
+         post_quarter = case_when(
+           year_quarter >= "2018_Q1" ~ year_quarter,
+           TRUE ~ "pre_2018"
+         ))
+
+# Then run the model with post-2018 quarter interactions
+model_quarter <- plm(log_m_exp_health ~ 
+                    Beneficiary +                           # Treatment group effect
+                    factor(post_quarter) +                  # Time period effects
+                    Beneficiary:factor(post_quarter) +      # Treatment*time interactions
+                    as.factor(age_group_simple) + 
+                    as.factor(edu_group_simple),
+                    index = c("hh_id", "Date"), 
+                    data = final_hh_data,
+                    model = "within",
+                    effect = "twoways")
+#summary(model_quarter)
+```
+```{r, results='asis'}
+stargazer(model_quarter,
+          type = "latex",
+          title = "Dynamic Treatment Effects",
+          dep.var.labels = c("Log Monthly Health Expenditure"),
+          covariate.labels = c("Beneficiary", "2018 Q2", "2018 Q3", "2018 Q4",
+                              "2019 Q1", "2019 Q2", "2019 Q3", "2019 Q4", "Pre-2018"),
+          omit = c("age_group_simple", "edu_group_simple"),
+          add.lines = list(c("Age Controls", "Yes"),
+                          c("Education Controls", "Yes")),
+          notes.label = "Standard errors in parentheses")
+
+
+```
+Result shows that immediately following implementation, beneficiary households showed a significant 3.9% increase in health spending, highly significant at the 0.01 level.This initial effect remained relatively stable through Q2 2018 before showing a slight uptick to 1.3% in Q3 2018, though this increase was not statistically significant. However, starting in Q1 2019, we observe a significant decline in the treatment effect. Health expenditure decreased by 1.8% (p < 0.05) in Q1 2019, with this downward trend continuing and strengthening through subsequent quarters. By Q4 2019, beneficiary households were spending 3.3% less on health compared to the initial impact (p < 0.01). 
+
+```{r}
+#within health expenditure
+model_6 <- plm(log_m_exp_doc ~ Beneficiary:Post_2018+ as.factor(age_group_simple)+ as.factor(edu_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+#summary(model_6)
+
+model_7 <- plm(log_m_exp_medtest ~  Beneficiary:Post_2018+ as.factor(age_group_simple)+ as.factor(edu_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+#summary(model_7)
+
+model_8 <- plm(log_hosp_fee ~Beneficiary:Post_2018+ as.factor(age_group_simple)+ as.factor(edu_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+#summary(model_8)
+
+model_9 <- plm(log_health_ins ~ Beneficiary:Post_2018+ as.factor(age_group_simple)+ as.factor(edu_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+#summary(model_9)
+
+model_10 <- plm(log_health_enh ~ Beneficiary:Post_2018+ as.factor(age_group_simple)+ as.factor(edu_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+#summary(model_10)
+```
+```{r, results='asis'}
+
+stargazer(model_6, model_7, model_8, model_9, model_10,
+          type = "latex",       
+          title = "Health Expenditure Components",
+          column.labels = c("Doctor", "Tests", "Hospital", "Insurance", "Enhancement"),
+          keep = "Beneficiary:Post_2018",
+          covariate.labels = "Treatment Effect",
+          add.lines = list(c("Controls", "Yes", "Yes", "Yes", "Yes", "Yes")),
+          omit.stat = c("f", "ser"))
+```
+The table includes the change in expenditure on total health expenditure, doctor expenditure, medical tests, hospitalization fees, health insurance premiums and health enhancement. The expenditure on doctor expenditure is positive and significant at the 0.1 level, it shows a 0.4% increase in monthly expenditure for beneficiary households compared to non-beneficiary households. On average, we see a 3.4% increase in monthly expenditure on health insurance premium in beneficiary households compared to non-beneficiary households, it is highly significant at the 0.01 level. Similarily, we observe a 5.7% increase in monthly expenditure on health enhancement, highly significant at the 0.01 level. We observe a non-significant increase in monthly expenditure on medical tests and non-significant decrease in monthly expenditure on hospitalization fees in female households with the positive income shock. All variables are controlled for covariates.
+
+```{r}
+# other expenditure
+model_11 <- plm(log_exp_food ~  Beneficiary:Post_2018+ as.factor(age_group_simple)+ as.factor(edu_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+
+model_12 <- plm(log_exp_bills ~  Beneficiary:Post_2018+ as.factor(age_group_simple)+ as.factor(edu_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+
+model_13 <- plm(log_exp_clothing ~  Beneficiary:Post_2018+ as.factor(age_group_simple)+ as.factor(edu_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+
+model_14 <- plm(log_exp_recreation ~  Beneficiary:Post_2018+ as.factor(age_group_simple)+ as.factor(edu_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+
+model_15 <- plm(log_exp_transport ~  Beneficiary:Post_2018+ as.factor(age_group_simple)+ as.factor(edu_group_simple), index= c("hh_id" ,"Date"), data = final_hh_data,model = "within",effect = "twoways")
+
+
+```
+
+```{r, results='asis'}
+stargazer(model_11, model_12, model_13, model_14, model_15, 
+          type = "latex", 
+          title = "Change in Other Expenditure", 
+          dep.var.labels.include = FALSE, #
+          column.labels = c("Food", "Bills and Rent", "Clothing and Footwear", 
+                            "Recreation", "Transportation"),
+          keep = "Beneficiary:Post_2018", 
+          omit.stat = c("f", "ser") 
+         )
+```
+The table shows that beneficiary households spend more on food, clothing and footwear, recreation and transportation compared to non-beneficiary households post income shock, and decreased their monthly expenditure on bills and rent. These coefficients are all significant at the 0.01 level.
+```{r}
+#visualizations
+avg_expenditure <- final_hh_data %>%
+  group_by(Date, Beneficiary) %>%
+  summarise(
+    avg_health = mean(m_exp_health, na.rm = TRUE),
+    avg_health_doc = mean(m_exp_doctors_physio_fee, na.rm = TRUE),
+    avg_health_medtest = mean(m_exp_medical_tests, na.rm = TRUE),
+    avg_health_hosp_fee = mean(m_exp_hospitalisation_fees, na.rm = TRUE),
+    avg_health_ins = mean(m_exp_health_ins_premium, na.rm = TRUE),
+    avg_health_enh = mean(m_exp_health_enhancement, na.rm = TRUE),
+    avg_total_Exp = mean(tot_exp, na.rm = TRUE),
+    avg_exp_food = mean(m_exp_food, na.rm = TRUE),
+    avg_exp_cloth = mean(m_exp_clothing_n_footwear, na.rm = TRUE),
+    avg_exp_recreation = mean(m_exp_recreation, na.rm = TRUE),
+    avg_exp_bills = mean(m_exp_bills_n_rent, na.rm = TRUE),
+    avg_exp_transport = mean(m_exp_transport, na.rm = TRUE)
+  )
+
+# Reshape the data to long format
+long_avg_expenditure <- avg_expenditure %>%
+  pivot_longer(cols = starts_with("avg_"),  
+               names_to = "expenditure_type",
+               values_to = "value")
+
+health_avg_exp <- long_avg_expenditure%>%
+  filter(expenditure_type %in% c("avg_health", "avg_health_doc", "avg_health_medtest", "avg_health_hosp_fee", "avg_health_ins", "avg_health_enh"))%>%
+  mutate(log_value = log1p(value))
+
+# Breakdown of Components of Monthly household Health Expenditure
+ggplot(health_avg_exp %>% filter(expenditure_type != "avg_health"), 
+       aes(x = Date, y = value, fill = expenditure_type)) +
+  geom_area(alpha = 0.5, size = 1) +  # Adds shaded areas and lines
+  labs(
+    title = "Breakdown of Components of Monthly Health Expenditure",
+    x = "Year",
+    y = "Average Health Expenditure (in Hundreds INR)",
+    fill = "Expenditure Type",  
+    color = "Expenditure Type" 
+  ) +
+  geom_vline(xintercept = as.Date("2018-02-01"), linetype = "dashed", color = "brown",
+             size = 0.8)+
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 6)
+  )+
+  scale_fill_discrete(labels = c("Doctor Fees", "Health Enhancement", "Hospital Fees", "Health Insurance Premium", "Medical Tests"))
+
+```
+
+
+
